@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=GPU-Modus
+Comment=Grafikmodus und Energieprofil umschalten
+Exec=gpu-modus
+Icon=preferences-desktop-display
+Terminal=true
+Categories=Settings;HardwareSettings;

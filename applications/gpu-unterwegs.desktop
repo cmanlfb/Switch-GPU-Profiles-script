@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=GPU: Unterwegs (Akku)
+Comment=AMD-Grafik + Energieprofil power-saver – stromsparend
+Exec=gpu-modus unterwegs
+Icon=battery
+Terminal=true
+Categories=Settings;HardwareSettings;

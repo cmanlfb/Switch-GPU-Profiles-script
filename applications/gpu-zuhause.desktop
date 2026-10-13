@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=GPU: Zuhause (Leistung)
+Comment=NVIDIA direkt + Energieprofil performance – Gaming, 3D, Video
+Exec=gpu-modus zuhause
+Icon=video-display
+Terminal=true
+Categories=Settings;HardwareSettings;

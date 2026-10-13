@@ -1,0 +1,188 @@
+#!/usr/bin/env bash
+# gpu-modus – Grafikmodus auf dem ASUS ROG Strix G16 umschalten (TUI mit whiptail)
+#
+# Schnellwahl:
+#   Zuhause   – Ultimate + Energieprofil performance  (Dock, Gaming, 3D, Video)
+#   Unterwegs – Sparsam  + Energieprofil power-saver  (Akku, ohne Dock)
+#
+# Modi:
+#   Ultimate  – MUX 0 + prime-select nvidia  → NVIDIA steuert alle Bildschirme direkt (stabil)
+#   Hybrid    – MUX 1 + prime-select nvidia  → NVIDIA rendert, Laptop-Bild läuft über AMD
+#   Sparsam   – MUX 1 + prime-select on-demand → AMD rendert, NVIDIA nur auf Anfrage
+# Dazu: Energieprofil (powerprofilesctl), wirkt sofort.
+#
+# Aufruf: gpu-modus             (Menü)
+#         gpu-modus zuhause     (direkt Zuhause-Preset)
+#         gpu-modus unterwegs   (direkt Unterwegs-Preset)
+#         gpu-modus --status    (nur Status ausgeben)
+# Funktioniert auch auf der Textkonsole (Strg+Alt+F3), falls das Bild hängt.
+
+set -u
+
+MUX=/sys/devices/platform/asus-nb-wmi/gpu_mux_mode
+DGPU_OFF=/sys/devices/platform/asus-nb-wmi/dgpu_disable
+TITEL="GPU-Modus"
+
+mux_lesen()   { cat "$MUX" 2>/dev/null || echo "?"; }
+prime_lesen() { prime-select query 2>/dev/null || echo "?"; }
+profil_lesen() { powerprofilesctl get 2>/dev/null || echo "?"; }
+
+mux_text() {
+    case "$1" in
+        0) echo "Ultimate (dGPU direkt)" ;;
+        1) echo "Hybrid" ;;
+        *) echo "unbekannt" ;;
+    esac
+}
+
+modus_name() {
+    local m p
+    m=$(mux_lesen); p=$(prime_lesen)
+    if   [[ $m == 0 && $p == nvidia ]];    then echo "Ultimate (Zuhause)"
+    elif [[ $m == 1 && $p == nvidia ]];    then echo "Hybrid"
+    elif [[ $m == 1 && $p == on-demand ]]; then echo "Sparsam (Unterwegs)"
+    else echo "gemischt (MUX $m / prime $p)"
+    fi
+}
+
+status_text() {
+    local renderer
+    renderer=$(glxinfo -B 2>/dev/null | sed -n 's/^OpenGL renderer string: //p')
+    cat <<EOF
+Aktueller Modus:  $(modus_name)
+
+MUX:              $(mux_lesen) = $(mux_text "$(mux_lesen)")
+prime-select:     $(prime_lesen)
+dGPU abgeschaltet: $(cat "$DGPU_OFF" 2>/dev/null || echo "?")
+Energieprofil:    $(profil_lesen)
+Renderer:         ${renderer:-nicht ermittelbar (keine X-Sitzung?)}
+EOF
+}
+
+if ! command -v whiptail >/dev/null; then
+    echo "whiptail fehlt: sudo apt install whiptail" >&2
+    exit 1
+fi
+
+info()  { whiptail --title "$TITEL" --msgbox "$1" 20 70; }
+frage() { whiptail --title "$TITEL" --yesno "$1" 20 70; }
+
+# Root-Rechte einmal holen, damit sudo nicht mitten in der TUI fragt
+sudo_holen() {
+    sudo -n true 2>/dev/null && return 0
+    clear
+    echo "Für diese Änderung werden Root-Rechte benötigt."
+    sudo -v
+}
+
+neustart_fragen() {
+    if frage "Die Änderung wird erst nach einem kompletten Neustart wirksam.\n\nJetzt neu starten?"; then
+        systemctl reboot
+    else
+        info "Bitte später neu starten, damit der neue Modus aktiv wird."
+    fi
+}
+
+# Energieprofil wirkt sofort und braucht kein sudo
+profil_setzen() {
+    [[ -z $1 || $(profil_lesen) == "$1" ]] && return 0
+    powerprofilesctl set "$1"
+}
+
+# modus_setzen MUX PRIME NAME [ENERGIEPROFIL]
+modus_setzen() {
+    local ziel_mux=$1 ziel_prime=$2 name=$3 ziel_profil=${4:-}
+    local ist_mux ist_prime
+    ist_mux=$(mux_lesen); ist_prime=$(prime_lesen)
+
+    if [[ $ist_mux == "$ziel_mux" && $ist_prime == "$ziel_prime" ]]; then
+        if profil_setzen "$ziel_profil"; then
+            info "„$name“ ist aktiv.\n\nGrafik:        $(modus_name)\nEnergieprofil: $(profil_lesen)"
+        else
+            info "Grafikmodus passt, aber das Energieprofil konnte nicht gesetzt werden."
+        fi
+        return
+    fi
+
+    # MUX 0 ohne aktive dGPU würde zu einem schwarzen Bildschirm führen
+    if [[ $ziel_mux == 0 && $(cat "$DGPU_OFF" 2>/dev/null) == 1 ]]; then
+        info "Abbruch: Die NVIDIA ist abgeschaltet (dgpu_disable = 1).\nIm Ultimate-Modus gäbe es dann kein Bild."
+        return
+    fi
+
+    frage "Umstellen auf „$name“?\n\nMUX:          $ist_mux → $ziel_mux\nprime-select: $ist_prime → $ziel_prime${ziel_profil:+\nEnergieprofil: $(profil_lesen) → $ziel_profil (sofort)}\n\nDanach ist ein Neustart nötig.\nRückweg bei Problemen: Strg+Alt+F3, anmelden, gpu-modus starten." || return
+
+    sudo_holen || { info "Keine Root-Rechte, nichts geändert."; return; }
+
+    # Erst prime-select, dann MUX: so passt die Konfiguration beim nächsten Start
+    if [[ $ist_prime != "$ziel_prime" ]]; then
+        clear; echo "prime-select $ziel_prime …"
+        if ! sudo prime-select "$ziel_prime"; then
+            info "prime-select ist fehlgeschlagen. MUX wurde nicht geändert."
+            return
+        fi
+    fi
+    if [[ $ist_mux != "$ziel_mux" ]]; then
+        if ! echo "$ziel_mux" | sudo tee "$MUX" >/dev/null; then
+            info "MUX konnte nicht gesetzt werden.\nprime-select steht jetzt auf $ziel_prime."
+            return
+        fi
+    fi
+
+    profil_setzen "$ziel_profil" || true
+    neustart_fragen
+}
+
+zuhause()   { modus_setzen 0 nvidia    "Zuhause" performance; }
+unterwegs() {
+    modus_setzen 1 on-demand "Unterwegs" power-saver
+}
+
+profil_menue() {
+    local aktuell wahl
+    aktuell=$(profil_lesen)
+    wahl=$(whiptail --title "$TITEL" --default-item "$aktuell" --menu \
+        "Energieprofil (wirkt sofort, aktuell: $aktuell)" 15 70 3 \
+        performance "Turbo – Spiele, Lüfter laut" \
+        balanced    "Ausgewogen – Alltag" \
+        power-saver "Leise – Akku, wenig Last" \
+        3>&1 1>&2 2>&3) || return
+    if powerprofilesctl set "$wahl"; then
+        info "Energieprofil ist jetzt: $(profil_lesen)"
+    else
+        info "Energieprofil konnte nicht gesetzt werden."
+    fi
+}
+
+case "${1:-}" in
+    --status)  status_text; exit 0 ;;
+    zuhause)   zuhause;   clear; exit 0 ;;
+    unterwegs) unterwegs; clear; exit 0 ;;
+    "") ;;
+    *) echo "Aufruf: gpu-modus [zuhause|unterwegs|--status]" >&2; exit 1 ;;
+esac
+
+while true; do
+    wahl=$(whiptail --title "$TITEL" --menu \
+        "Aktuell: $(modus_name)  |  Energieprofil: $(profil_lesen)" 20 76 8 \
+        Z "Zuhause   – volle Leistung: Gaming, 3D, Video (Dock)" \
+        U "Unterwegs – Akku sparen, leise (ohne Dock)" \
+        "" "" \
+        1 "Ultimate  – nur Grafik, Energieprofil bleibt" \
+        2 "Hybrid    – NVIDIA rendert, Laptop-Bild über AMD" \
+        3 "Sparsam   – nur Grafik, Energieprofil bleibt" \
+        4 "Energieprofil ändern" \
+        5 "Status anzeigen" \
+        3>&1 1>&2 2>&3) || break
+
+    case "$wahl" in
+        Z) zuhause ;;
+        U) unterwegs ;;
+        1) modus_setzen 0 nvidia    "Ultimate" ;;
+        2) modus_setzen 1 nvidia    "Hybrid" ;;
+        3) modus_setzen 1 on-demand "Sparsam" ;;
+        4) profil_menue ;;
+        5) info "$(status_text)" ;;
+    esac
+done
+clear
